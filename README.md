@@ -53,3 +53,11 @@ If you use a separate 5V supply for the servo, keep the servo ground and ESP32 g
 - The browser writes the angle directly to Supabase.
 - The ESP32 polls Supabase over HTTPS and moves the servo when the angle changes.
 - Stable Wi-Fi improves responsiveness and reduces connection failures.
+
+## Demo Video
+
+https://github.com/user-attachments/assets/015e6c6a-2985-45fc-838e-ca48dea3773a
+
+
+
+
