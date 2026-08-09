@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Servo Control Panel</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0f172a;
+      color: #f8fafc;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+
+    .panel {
+      width: min(460px, 90vw);
+      background: #111827;
+      border: 1px solid #334155;
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+
+    h1 {
+      margin-top: 0;
+      font-size: 24px;
+      text-align: center;
+    }
+
+    .slider-wrap {
+      margin-top: 20px;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: #38bdf8;
+      cursor: pointer;
+    }
+
+    .value-box {
+      margin-top: 14px;
+      text-align: center;
+      font-size: 32px;
+      font-weight: bold;
+      color: #38bdf8;
+    }
+
+    .speak-btn {
+      margin-top: 20px;
+      width: 100%;
+      padding: 12px;
+      border: 2px solid #38bdf8;
+      border-radius: 999px;
+      background: #0f2a3d;
+      color: #e0f2fe;
+      font-size: 16px;
+      font-weight: bold;
+      cursor: pointer;
+      transition: 0.2s ease;
+    }
+
+    .speak-btn:hover { background: #123952; }
+    .speak-btn.listening {
+      background: #3f1d1d;
+      border-color: #f87171;
+      color: #fee2e2;
+    }
+
+    .transcript-bar {
+      margin-top: 12px;
+      min-height: 46px;
+      padding: 10px 14px;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      background: #111827;
+      color: #cbd5e1;
+      font-size: 14px;
+      text-align: center;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+      word-break: break-word;
+    }
+
+    .status {
+      margin-top: 18px;
+      text-align: center;
+      color: #cbd5e1;
+      min-height: 24px;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <h1>Servo Control Panel</h1>
+
+    <div class="slider-wrap">
+      <input id="angleSlider" type="range" min="0" max="180" value="90">
+      <div id="angleValue" class="value-box">90°</div>
+    </div>
+
+    <button id="speakBtn" class="speak-btn" onclick="toggleSpeechRecognition()">🎤 Speak Angle</button>
+    <div id="transcriptBar" class="transcript-bar">Waiting for speech...</div>
+    <div id="status" class="status">Ready</div>
+  </div>
+
+  <script>
+    const slider = document.getElementById('angleSlider');
+    const angleValue = document.getElementById('angleValue');
+    const status = document.getElementById('status');
+    const transcriptBar = document.getElementById('transcriptBar');
+    const speakBtn = document.getElementById('speakBtn');
+
+    const SUPABASE_URL = 'https://***************.supabase.co';
+    const SUPABASE_ANON_KEY = '************************REPLACE_WITH_ANON_KEY************************';
+    const TABLE_NAME = 'servo_state';
+    const ROW_ID = 'servo';
+
+    let recognition = null;
+    let isListening = false;
+    let pendingAngle = null;
+    let sendTimer = null;
+
+    const SEND_INTERVAL_MS = 120;
+
+    function updateStatus(message) {
+      status.textContent = message;
+    }
+
+    function updateTranscript(message) {
+      transcriptBar.textContent = message;
+    }
+
+    function setAngle(angle, send = false) {
+      const safeAngle = Math.max(0, Math.min(180, parseInt(angle, 10) || 0));
+      slider.value = safeAngle;
+      angleValue.textContent = safeAngle + '°';
+
+      if (send) {
+        sendAngle(safeAngle);
+      }
+    }
+
+    function normalizeAngle(text) {
+      const cleaned = (text || '').trim().toLowerCase().replace(/,/g, ' ').replace(/-/g, ' ');
+
+      const digitMatch = cleaned.match(/\b(\d{1,3})\b/);
+      if (digitMatch) {
+        return parseInt(digitMatch[1], 10);
+      }
+
+      const words = {
+        zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9,
+        ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16,
+        seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50,
+        sixty: 60, seventy: 70, eighty: 80, ninety: 90, hundred: 100
+      };
+
+      let total = 0;
+      let current = 0;
+
+      cleaned.split(/\s+/).forEach(token => {
+        if (!token || ['set', 'angle', 'to', 'degrees', 'degree', 'and', 'the'].includes(token)) {
+          return;
+        }
+
+        if (token === 'hundred') {
+          current *= 100;
+          return;
+        }
+
+        const value = words[token];
+        if (typeof value === 'number') {
+          current += value;
+        }
+      });
+
+      total = current;
+      return total >= 0 && total <= 180 ? total : null;
+    }
+
+    function queueAngleSend(angle) {
+      pendingAngle = angle;
+      if (sendTimer) {
+        return;
+      }
+
+      sendTimer = setTimeout(async function () {
+        const angleToSend = pendingAngle;
+        pendingAngle = null;
+        sendTimer = null;
+        await sendAngle(angleToSend);
+      }, SEND_INTERVAL_MS);
+    }
+
+    slider.addEventListener('input', function () {
+      setAngle(slider.value, false);
+      queueAngleSend(parseInt(slider.value, 10));
+    });
+
+    slider.addEventListener('change', function () {
+      setAngle(slider.value, false);
+      queueAngleSend(parseInt(slider.value, 10));
+    });
+
+    function initSpeechRecognition() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+      if (!SpeechRecognition) {
+        updateStatus('Speech recognition is not supported in this browser');
+        return null;
+      }
+
+      recognition = new SpeechRecognition();
+      recognition.lang = 'en-US';
+      recognition.continuous = false;
+      recognition.interimResults = true;
+
+      recognition.onstart = function () {
+        isListening = true;
+        speakBtn.textContent = '🎤 Listening...';
+        speakBtn.classList.add('listening');
+        updateStatus('Listening for an angle...');
+      };
+
+      recognition.onresult = function (event) {
+        let transcript = '';
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript;
+          if (!event.results[i].isFinal) {
+            transcript += ' ';
+          }
+        }
+
+        transcript = transcript.trim();
+        if (transcript) {
+          updateTranscript(transcript);
+        }
+
+        const finalResult = event.results[event.results.length - 1];
+        if (finalResult && finalResult.isFinal) {
+          const angle = normalizeAngle(transcript);
+          if (angle !== null) {
+            setAngle(angle, false);
+            queueAngleSend(angle);
+            updateStatus('Recognized angle: ' + angle + '°');
+          } else {
+            updateStatus('I could not recognize a valid angle');
+          }
+        }
+      };
+
+      recognition.onerror = function (event) {
+        isListening = false;
+        speakBtn.textContent = '🎤 Speak Angle';
+        speakBtn.classList.remove('listening');
+        updateTranscript('Could not capture speech');
+        updateStatus('Speech error: ' + event.error);
+      };
+
+      recognition.onend = function () {
+        isListening = false;
+        speakBtn.textContent = '🎤 Speak Angle';
+        speakBtn.classList.remove('listening');
+      };
+
+      return recognition;
+    }
+
+    function toggleSpeechRecognition() {
+      if (!recognition) {
+        recognition = initSpeechRecognition();
+      }
+
+      if (!recognition) {
+        return;
+      }
+
+      if (isListening) {
+        recognition.stop();
+        return;
+      }
+
+      recognition.start();
+    }
+
+    async function loadCurrentAngle() {
+      try {
+        const response = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE_NAME}?select=angle&id=eq.${ROW_ID}&order=updated_at.desc&limit=1`, {
+          method: 'GET',
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error('Could not load current angle');
+        }
+
+        const data = await response.json();
+        if (Array.isArray(data) && data.length > 0 && typeof data[0].angle === 'number') {
+          setAngle(data[0].angle, false);
+          updateStatus('Loaded angle from Supabase: ' + data[0].angle + '°');
+        }
+      } catch (error) {
+        updateStatus('Supabase load failed: ' + error.message);
+      }
+    }
+
+    async function readSupabaseError(response) {
+      const raw = await response.text();
+      if (!raw) {
+        return `HTTP ${response.status}`;
+      }
+
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed.message || parsed.error_description || parsed.hint || raw;
+      } catch {
+        return raw;
+      }
+    }
+
+    async function createServoRow(angle) {
+      const response = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE_NAME}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          'Prefer': 'return=representation'
+        },
+        body: JSON.stringify({
+          id: ROW_ID,
+          angle: angle,
+          updated_at: new Date().toISOString()
+        })
+      });
+
+      if (!response.ok) {
+        const details = await readSupabaseError(response);
+        throw new Error(details);
+      }
+    }
+
+    async function sendAngle(angle) {
+      updateStatus('Sending angle to Supabase...');
+
+      try {
+        const response = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE_NAME}?id=eq.${ROW_ID}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'Prefer': 'return=representation'
+          },
+          body: JSON.stringify({
+            angle: angle,
+            updated_at: new Date().toISOString()
+          })
+        });
+
+        if (!response.ok) {
+          const details = await readSupabaseError(response);
+          throw new Error(details);
+        }
+
+        const updatedRows = await response.json();
+        if (!Array.isArray(updatedRows) || updatedRows.length === 0) {
+          await createServoRow(angle);
+        }
+
+        updateStatus('Servo angle updated to ' + angle + '°');
+      } catch (error) {
+        updateStatus('Failed to send angle: ' + error.message);
+      }
+    }
+
+    window.addEventListener('load', function () {
+      loadCurrentAngle();
+    });
+  </script>
+</body>
+</html>
