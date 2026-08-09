@@ -1,4 +1,4 @@
-# Servo Control Panel Project
+# Servo Control Panel
 
 This project lets a web page control a servo motor through Supabase and an ESP32.
 
@@ -30,6 +30,16 @@ Update these values in the web page and ESP32 code:
 - Supabase anon key
 - Wi-Fi name
 - Wi-Fi password
+
+## Servo Connections
+
+Connect the servo to the ESP32 as follows:
+
+- Servo signal -> GPIO 18
+- Servo VCC -> 5V supply
+- Servo GND -> ESP32 GND
+
+If you use a separate 5V supply for the servo, keep the servo ground and ESP32 ground connected together.
 
 ## Usage
 
